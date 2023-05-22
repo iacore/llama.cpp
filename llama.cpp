@@ -2,6 +2,8 @@
 
 #include "ggml.h"
 
+#include <coz.h>
+
 #include <cinttypes>
 #include <fstream>
 #include <random>
@@ -11,6 +13,7 @@
 #include <regex>
 #include <cassert>
 #include <cstring>
+#include <iostream>
 
 #if defined(_WIN32) && !defined(_POSIX_MAPPED_FILES)
 #define WIN32_LEAN_AND_MEAN
@@ -61,10 +64,10 @@ static const size_t MB = 1024*1024;
 //       needs modifications in ggml
 
 static const std::map<e_model, size_t> MEM_REQ_SCRATCH0 = {
-    { MODEL_7B,    512ull*MB },
-    { MODEL_13B,   512ull*MB },
-    { MODEL_30B,   512ull*MB },
-    { MODEL_65B,   512ull*MB },
+    { MODEL_7B,    1024ull*MB },
+    { MODEL_13B,   1024ull*MB },
+    { MODEL_30B,   1024ull*MB },
+    { MODEL_65B,   1024ull*MB },
 };
 
 static const std::map<e_model, size_t> MEM_REQ_SCRATCH1 = {
@@ -649,9 +652,12 @@ static bool llama_model_load(
             int32_t length;
             int32_t ftype;
 
+            const size_t tensor_header_start = fin.tellg();
             fin.read(reinterpret_cast<char *>(&n_dims), sizeof(n_dims));
             fin.read(reinterpret_cast<char *>(&length), sizeof(length));
             fin.read(reinterpret_cast<char *>(&ftype),  sizeof(ftype));
+
+
 
             if (fin.eof()) {
                 break;
@@ -666,6 +672,8 @@ static bool llama_model_load(
 
             std::string name(length, 0);
             fin.read(&name[0], length);
+
+            const size_t tensor_header_end = fin.tellg();
 
             if (model.tensors.find(name.data()) == model.tensors.end()) {
                 fprintf(stderr, "%s: unknown tensor '%s' in model file\n", __func__, name.data());
@@ -703,12 +711,15 @@ static bool llama_model_load(
 
             // load the tensor data into memory without copying or reading it
             size_t offset = fin.tellg();
+            size_t tensor_start = offset;
             size_t tensor_data_size = ggml_nbytes(tensor);
             offset = (offset + 31) & -32;
             tensor->data = mm_addr + offset;
             fin.seekg(offset + tensor_data_size);
             total_size += tensor_data_size;
             model.n_loaded++;
+
+            std::cout << "header " << tensor_header_start << ".." << tensor_header_end << " n_dims=" << n_dims << " ne=" << ne[0] << "," << ne[1] << " length=" << length << " ftype=" << ftype << " tensor_unaligned_start " << tensor_start << " aligned_start " << offset << " tensor_end " << (offset + tensor_data_size) << std::endl;
 
             // progress
             if (progress_callback) {
@@ -888,7 +899,7 @@ static bool llama_eval_internal(
                     cur);
         }
 
-        lctx.use_buf(ctx0, 1);
+        lctx.use_buf(ctx0, 0);
 
         struct ggml_tensor * inpFF = ggml_add(ctx0, cur, inpSA);
 
@@ -1724,7 +1735,10 @@ int llama_eval(
                          int   n_tokens,
                          int   n_past,
                          int   n_threads) {
-    if (!llama_eval_internal(*ctx, tokens, n_tokens, n_past, n_threads)) {
+    COZ_BEGIN("llama_eval_internal")
+    bool ret = llama_eval_internal(*ctx, tokens, n_tokens, n_past, n_threads);
+    COZ_END("llama_eval_internal")
+    if (!ret) {
         fprintf(stderr, "%s: failed to eval\n", __func__);
         return 1;
     }
